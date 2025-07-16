@@ -1,4 +1,4 @@
-/*****************************************************************************
+/*
  * sahara.cpp
  *
  * This class implements sahara protocol support
@@ -144,7 +144,6 @@ int Sahara::ModeSwitch(int mode, bool rsp)
   if (rsp) {
       status = sport->Read((unsigned char *)&read_data_req, &bytesRead);
   }
-  //sport->UnRead((unsigned char *)&read_data_req, &bytesRead);
   return status;
 }
 
@@ -221,7 +220,7 @@ int Sahara::LoadFlashProg(char *szFlashPrg)
   emmcdl_close(hFlashPrg);
 
   if (read_cmd_hdr.cmd != SAHARA_END_TRANSFER) {
-	Log("Expecting SAHARA_END_TRANSFER but found: %i\n", read_cmd_hdr.cmd);
+    Log("Expecting SAHARA_END_TRANSFER but found: %i\n", read_cmd_hdr.cmd);
     return ERROR_WRITE_FAULT;
   }
 
@@ -229,8 +228,8 @@ int Sahara::LoadFlashProg(char *szFlashPrg)
   bytesRead = sizeof(read_img_end);
   status = sport->Read((unsigned char *)&read_img_end, &bytesRead);
   if (read_img_end.status != SAHARA_ERROR_SUCCESS) {
-	  Log("Image load failed with status: %i\n", read_img_end.status);
-	  return read_img_end.status;
+    Log("Image load failed with status: %i\n", read_img_end.status);
+    return read_img_end.status;
   }
 
   done_t done_pkt = {0};
@@ -244,7 +243,7 @@ int Sahara::LoadFlashProg(char *szFlashPrg)
   bytesRead = sizeof(done_pkt);
   status = sport->Read((unsigned char*)&done_pkt,&bytesRead);
   if( done_pkt.cmd != SAHARA_DONE_RSP) {
-	Log("Expecting SAHARA_DONE_RSP but found: %i", done_pkt.cmd);
+    Log("Expecting SAHARA_DONE_RSP but found: %i", done_pkt.cmd);
     return ERROR_WRITE_FAULT;
   }
 
@@ -261,12 +260,10 @@ int Sahara::CheckDevice(void)
   uint32_t bytesRead = sizeof(hello_req);
   if (sport->InputBufferCount()) {
       status = sport->Read((unsigned char *)&hello_req,&bytesRead);
-      //sport->UnRead((unsigned char *)&hello_req, &bytesRead);
       if (hello_req.cmd == SAHARA_HELLO_REQ ) {
           status = ModeSwitch(SAHARA_MODE_COMMAND, false);
       }
   } else {
-
       // Assume that we already got the hello req so send hello response
       status = ConnectToDevice(false, SAHARA_MODE_COMMAND);
       if (status != 0) {
@@ -280,8 +277,7 @@ int Sahara::CheckDevice(void)
       sport->SetTimeout(10);
       status = sport->Read((unsigned char *)&cmd_rdy, &bytesRead);
       if (status != 0 || bytesRead == 0 || (cmd_rdy.cmd == SAHARA_END_TRANSFER && cmd_rdy.data_len == SAHARA_NAK_INVALID_CMD)) {
-        // Assume there was a data toggle issue and send the mode switch command
-        //return ModeSwitch(SAHARA_MODE_COMMAND, false);
+        // Skip error for Xiaomi compatibility
       } else if (cmd_rdy.cmd != SAHARA_CMD_READY) {
         Log("PblHack: Error - cmd:%i, status:%i\n", cmd_rdy.cmd, cmd_rdy.data_len);
         return ERROR_INVALID_DATA;
@@ -299,19 +295,26 @@ int Sahara::ConnectToDevice(bool bReadHello, int mode)
   uint32_t bytesRead = sizeof(hello_req);
 
   if (bReadHello) {
-    sport->SetTimeout(10);
+    sport->SetTimeout(10000); // Increased timeout for Xiaomi devices (10 seconds)
     status = sport->Read((unsigned char *)&hello_req, &bytesRead);
     if (status < 0) return -1;
+    
+    // Xiaomi-specific protocol check
+    if (hello_req.ifc_protocol != 0xff && hello_req.ifc_protocol != 0x10) {
+      Log("Unsupported Sahara protocol: 0x%02X\n", hello_req.ifc_protocol);
+      return -1;
+    }
+    
     if (hello_req.cmd != SAHARA_HELLO_REQ) {
       // If no hello packet is waiting then try PBL hack to bring device to good state
       if (PblHack() != 0) {
-        // If we fail to connect try to do a mode switch command to get hello packet and try again
         Log("Did not receive Sahara hello packet from device\n");
         return -1;
       }
     }
-    Log((char *)"Sahara version %d--%d \nmode %d.\n", hello_req.version_min, hello_req.version, hello_req.mode);
-    sport->SetTimeout(2000);
+    Log("Xiaomi Debug: CMD=0x%02X, Protocol=0x%02X, Mode=%d\n", 
+        hello_req.cmd, hello_req.ifc_protocol, hello_req.mode);
+    sport->SetTimeout(5000); // Increased timeout for Xiaomi EDL
   } else {
     // Read any pending data
     sport->Flush();
@@ -329,12 +332,11 @@ int Sahara::ConnectToDevice(bool bReadHello, int mode)
   if (status != 0) {
     Log("Failed to write hello response back to device\n");
     return -1;
- }
+  }
 
   return 0;
 }
 
-// This function is to fix issue where PBL does not propery handle PIPE reset need to make sure 1 TX and 1 RX is working we may be out of sync...
 int Sahara::PblHack(void)
 {
   int status = 0;
@@ -349,16 +351,16 @@ int Sahara::PblHack(void)
   execute_rsp_t cmd_rdy;
   uint32_t bytesRead = sizeof(cmd_rdy);
 
-  sport->SetTimeout(10);
+  sport->SetTimeout(10000); // Increased timeout for Xiaomi
   status = sport->Read((unsigned char *)&cmd_rdy, &bytesRead);
   if (status != 0 || bytesRead == 0) {
-    // Assume there was a data toggle issue and send the mode switch command
-    return ModeSwitch(SAHARA_MODE_IMAGE_TX_PENDING);
+    // Xiaomi-specific fallback
+    Log("Attempting Xiaomi-compatible mode switch...\n");
+    return ModeSwitch(SAHARA_MODE_COMMAND, false);
   } else if (cmd_rdy.cmd != SAHARA_CMD_READY) {
     Log("PblHack: Error - cmd:%i, status:%i\n", cmd_rdy.cmd, cmd_rdy.data_len);
     return ERROR_INVALID_DATA;
   }
 
-  // Successfully got the CMD_READY so now switch back to normal mode
-  return ModeSwitch(SAHARA_MODE_IMAGE_TX_PENDING);
+  return 0;
 }
